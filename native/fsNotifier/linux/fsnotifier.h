@@ -60,7 +60,7 @@ bool init_inotify(void);
 
 void set_inotify_callback(void (*callback)(const char *, uint32_t));
 int get_inotify_fd(void);
-int watch(const char* root, array* mounts);
+int watch(const char* root, array* mounts, array* signore);
 void unwatch(int id);
 bool process_inotify_input(void);
 void close_inotify(void);

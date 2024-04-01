@@ -32,12 +32,14 @@ typedef struct {
 } watch_root;
 
 static array* roots = NULL;
+static array* superignored = NULL;
 
 static bool self_test = false;
 
 static void run_self_test(void);
 static bool main_loop(void);
 static int read_input(void);
+static bool update_signore(array* new_ignores);
 static bool update_roots(array* new_roots);
 static void unregister_roots(void);
 static bool register_roots(array* new_roots, array* unwatchable, array* mounts);
@@ -75,7 +77,8 @@ int main(int argc, char** argv) {
 
   int rv = 0;
   roots = array_create(20);
-  if (roots != NULL && init_inotify()) {
+  superignored = array_create(20);
+  if (roots != NULL && superignored != NULL && init_inotify()) {
     set_inotify_callback(&inotify_callback);
 
     if (self_test) {
@@ -93,6 +96,7 @@ int main(int argc, char** argv) {
   }
   close_inotify();
   array_delete(roots);
+  array_delete(superignored);
 
   userlog(LOG_INFO, "finished (%d)", rv);
   return rv;
@@ -174,6 +178,25 @@ static int read_input(void) {
   if (line == NULL || strcmp(line, "EXIT") == 0) {
     return 0;
   }
+  else if (strcmp(line, "SIGNORE") == 0) {
+    array* new_ignore = array_create(20);
+    CHECK_NULL(new_ignore, ERR_ABORT)
+
+    while (true) {
+      line = read_line(stdin);
+      if (line == NULL || strlen(line) == 0) {
+        return 0;
+      }
+      else if (strcmp(line , "#") == 0) {
+        break;
+      }
+      else {
+        CHECK_NULL(array_push(new_ignore, strdup(line)), ERR_ABORT)
+      }
+    }
+
+    return update_signore(new_ignore) ? ERR_CONTINUE : ERR_ABORT;
+  }
   else if (strcmp(line, "ROOTS") == 0) {
     array* new_roots = array_create(20);
     CHECK_NULL(new_roots, ERR_ABORT)
@@ -201,6 +224,43 @@ static int read_input(void) {
   }
 }
 
+static bool update_signore(array* new_ignores) {
+  userlog(LOG_WARNING, "updating superignores (curr:%d, new:%d)", array_size(superignored), array_size(new_ignores));
+
+  if (array_size(new_ignores) == 0) {
+    array_delete(new_ignores);
+    return true;
+  }
+  for (int i = 0; i < array_size(new_ignores); i++) {
+    const char* new_ignore = array_get(new_ignores, i);
+
+    bool found = false;
+    for (int j = 0; j < strlen(new_ignore); j++) {
+      if (new_ignore[j] == '*') {
+        found = true;
+        break;
+      }
+    }
+    if (found) continue;
+
+    found = false;
+    for (int j = 0; j < array_size(superignored); j++) {
+      int res = strcmp(array_get(superignored, j), new_ignore);
+      // userlog(LOG_WARNING, "checking: %s, %s, %d", array_get(new_ignore, i), array_get(superignored, j), res);
+      if(res == 0) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      userlog(LOG_WARNING, "adding to super ignore: %s", new_ignore);
+      CHECK_NULL(array_push(superignored, strdup(new_ignore)), false)
+    }
+  }
+
+  array_delete_vs_data(new_ignores);
+  return true;
+}
 
 static bool update_roots(array* new_roots) {
   userlog(LOG_INFO, "updating roots (curr:%d, new:%d)", array_size(roots), array_size(new_roots));
@@ -287,7 +347,7 @@ static bool register_roots(array* new_roots, array* unwatchable, array* mounts) 
       continue;
     }
 
-    int id = watch(new_root, inner_mounts);
+    int id = watch(new_root, inner_mounts, superignored);
     array_delete(inner_mounts);
 
     if (id >= 0 || id == ERR_MISSING) {
@@ -409,7 +469,7 @@ static void check_missing_roots(void) {
     if (root->id < 0) {
       char* unflattened = UNFLATTEN(root->path);
       if (stat(unflattened, &st) == 0) {
-        root->id = watch(root->path, NULL);
+        root->id = watch(root->path, NULL, superignored);
         userlog(LOG_INFO, "root restored: %s\n", root->path);
         report_event("CREATE", unflattened);
         report_event("CHANGE", unflattened);

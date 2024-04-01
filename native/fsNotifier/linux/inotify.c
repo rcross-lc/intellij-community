@@ -11,6 +11,7 @@
 #include <sys/inotify.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <libgen.h>
 
 
 #define WATCH_COUNT_NAME "/proc/sys/fs/inotify/max_user_watches"
@@ -211,12 +212,22 @@ static void rm_watch(int wd, bool update_parent) {
 }
 
 
-static int walk_tree(unsigned int path_len, watch_node* parent, bool recursive, array* mounts) {
+static int walk_tree(unsigned int path_len, watch_node* parent, bool recursive, array* mounts, array* signore) {
   for (int j = 0; j < array_size(mounts); j++) {
     char* mount = array_get(mounts, j);
     if (strncmp(path_buf, mount, strlen(mount)) == 0) {
       userlog(LOG_INFO, "watch path '%s' crossed mount point '%s' - skipping", path_buf, mount);
       return ERR_IGNORE;
+    }
+  }
+
+  if (signore != NULL) {
+    const char* fname = basename(strdup(path_buf));
+    for (int j = 0; j < array_size(signore); j++) {
+      if (strcmp(fname, array_get(signore, j)) == 0) {
+        userlog(LOG_WARNING, "ignoring %s due to signore %s", path_buf, array_get(signore, j));
+        return ERR_IGNORE;
+      }
     }
   }
 
@@ -269,7 +280,7 @@ static int walk_tree(unsigned int path_len, watch_node* parent, bool recursive, 
       }
     }
 
-    int subdir_id = walk_tree(path_len + 1 + name_len, table_get(watches, id), recursive, mounts);
+    int subdir_id = walk_tree(path_len + 1 + name_len, table_get(watches, id), recursive, mounts, signore);
     if (subdir_id < 0 && subdir_id != ERR_IGNORE) {
       rm_watch(id, true);
       id = subdir_id;
@@ -282,7 +293,7 @@ static int walk_tree(unsigned int path_len, watch_node* parent, bool recursive, 
 }
 
 
-int watch(const char* root, array* mounts) {
+int watch(const char* root, array* mounts, array* signore) {
   bool recursive = true;
   if (root[0] == '|') {
     root++;
@@ -319,7 +330,7 @@ int watch(const char* root, array* mounts) {
 
   memcpy(path_buf, root, path_len);
   path_buf[path_len] = '\0';
-  return walk_tree(path_len, NULL, recursive, mounts);
+  return walk_tree(path_len, NULL, recursive, mounts, signore);
 }
 
 
@@ -351,7 +362,7 @@ static bool process_inotify_event(struct inotify_event* event) {
   }
 
   if (is_dir && event->mask & (IN_CREATE | IN_MOVED_TO)) {
-    int result = walk_tree(path_len, node, true, NULL);
+    int result = walk_tree(path_len, node, true, NULL, NULL);
     if (result < 0 && result != ERR_IGNORE && result != ERR_CONTINUE) {
       return false;
     }
